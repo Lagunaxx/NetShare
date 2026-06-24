@@ -1,0 +1,6 @@
+{
+  "name": "WiFi File Share",
+  "description": "Cross-platform WiFi file and folder sharing between Android and Linux/PC with dual pane UI, permissions, and QR codes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
