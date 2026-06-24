@@ -12,6 +12,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -73,6 +75,7 @@ fun MainLayout(viewModel: FileSharingViewModel) {
     val logs by viewModel.logs.collectAsState()
     val transferProgress by viewModel.transferProgress.collectAsState()
     val sharedUri by viewModel.sharedUri.collectAsState()
+    val localFolderStats by viewModel.localFolderStats.collectAsState()
 
     // Dialog flags
     var showQrDialog by remember { mutableStateOf(false) }
@@ -82,7 +85,9 @@ fun MainLayout(viewModel: FileSharingViewModel) {
     var inputFolderName by remember { mutableStateOf("") }
     var ipInputText by remember { mutableStateOf(remoteIp) }
     var showLogsDialog by remember { mutableStateOf(false) }
-    var showPermissionsDialog by remember { mutableStateOf(false) }
+    var showSettingsDialog by remember { mutableStateOf(false) }
+    var customPathInput by remember { mutableStateOf("") }
+    var customPathError by remember { mutableStateOf("") }
     var activePortraitPane by remember { mutableStateOf(0) }
 
     // Keep manual IP input synced with state
@@ -392,11 +397,13 @@ fun MainLayout(viewModel: FileSharingViewModel) {
                         Text("Удаление", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color(0xFF191C19))
                     }
 
-                    // Action 4: Rights (Permissions Settings)
+                    // Action 4: Settings (Folder & Permissions Settings)
                     Column(
                         modifier = Modifier
                             .clickable {
-                                showPermissionsDialog = true
+                                customPathInput = localSharedRoot.absolutePath
+                                customPathError = ""
+                                showSettingsDialog = true
                             }
                             .padding(8.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
@@ -407,10 +414,10 @@ fun MainLayout(viewModel: FileSharingViewModel) {
                                 .background(Color(0xFFDCE5D5), CircleShape),
                             contentAlignment = Alignment.Center
                         ) {
-                            Icon(imageVector = Icons.Default.AdminPanelSettings, contentDescription = "Permissions", tint = Color(0xFF191C19), modifier = Modifier.size(18.dp))
+                            Icon(imageVector = Icons.Default.Settings, contentDescription = "Settings", tint = Color(0xFF191C19), modifier = Modifier.size(18.dp))
                         }
                         Spacer(modifier = Modifier.height(4.dp))
-                        Text("Права", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color(0xFF191C19))
+                        Text("Настройки", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color(0xFF191C19))
                     }
                 }
             }
@@ -560,63 +567,262 @@ fun MainLayout(viewModel: FileSharingViewModel) {
 
         // --- Dialogs Section ---
 
-        // Permissions Dialog
-        if (showPermissionsDialog) {
+        // Settings Dialog (Folder & Permissions Settings)
+        if (showSettingsDialog) {
             AlertDialog(
-                onDismissRequest = { showPermissionsDialog = false },
-                title = { Text("Настройка прав доступа", fontWeight = FontWeight.Bold, color = Color(0xFF191C19)) },
+                onDismissRequest = { showSettingsDialog = false },
+                title = { 
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(imageVector = Icons.Default.Settings, contentDescription = null, tint = Color(0xFF386B40))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Настройки раздачи", fontWeight = FontWeight.Bold, color = Color(0xFF191C19))
+                    }
+                },
                 text = {
-                    Column {
-                        Text(
-                            text = "Задайте права доступа для сторонних устройств, подключающихся к вашему серверу:",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFF72796F),
-                            modifier = Modifier.padding(bottom = 12.dp)
-                        )
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable {
-                            viewModel.updateHostPermissions(!hostPermissions.allowRead, hostPermissions.allowWrite, hostPermissions.allowDelete)
-                        }.padding(vertical = 4.dp)) {
-                            Checkbox(
-                                checked = hostPermissions.allowRead,
-                                onCheckedChange = { checked ->
-                                    viewModel.updateHostPermissions(checked, hostPermissions.allowWrite, hostPermissions.allowDelete)
-                                }
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        // Section 1: Info and Stats
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color(0xFFF0F4EC), RoundedCornerShape(12.dp))
+                                .padding(12.dp)
+                        ) {
+                            Text(
+                                "Текущая расшаренная папка:",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF386B40)
                             )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Разрешить чтение (скачивание)", style = MaterialTheme.typography.bodyMedium, color = Color(0xFF191C19))
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = localSharedRoot.absolutePath,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFF191C19)
+                            )
+                            
+                            Spacer(modifier = Modifier.height(8.dp))
+                            
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "Статистика содержимого:",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF72796F)
+                                )
+                                IconButton(
+                                    onClick = { viewModel.calculateLocalFolderStats() },
+                                    modifier = Modifier.size(24.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Refresh,
+                                        contentDescription = "Refresh Stats",
+                                        tint = Color(0xFF386B40),
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                            
+                            if (localFolderStats.isCalculating) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.padding(top = 4.dp)
+                                ) {
+                                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Color(0xFF386B40))
+                                    Text("Идет подсчет...", style = MaterialTheme.typography.bodySmall, color = Color(0xFF72796F))
+                                }
+                            } else {
+                                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text("Папок: ${localFolderStats.totalFolders}", style = MaterialTheme.typography.bodySmall, color = Color(0xFF191C19))
+                                    Text("Файлов: ${localFolderStats.totalFiles}", style = MaterialTheme.typography.bodySmall, color = Color(0xFF191C19))
+                                    Text("Общий объем: ${formatBytesSize(localFolderStats.totalSize)} (оценочно)", style = MaterialTheme.typography.bodySmall, color = Color(0xFF191C19))
+                                }
+                            }
                         }
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable {
-                            viewModel.updateHostPermissions(hostPermissions.allowRead, !hostPermissions.allowWrite, hostPermissions.allowDelete)
-                        }.padding(vertical = 4.dp)) {
-                            Checkbox(
-                                checked = hostPermissions.allowWrite,
-                                onCheckedChange = { checked ->
-                                    viewModel.updateHostPermissions(hostPermissions.allowRead, checked, hostPermissions.allowDelete)
-                                }
+
+                        // Section 2: Quick Presets
+                        Column {
+                            Text(
+                                "Быстрый выбор папки:",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF191C19)
                             )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Разрешить запись (загрузку)", style = MaterialTheme.typography.bodyMedium, color = Color(0xFF191C19))
+                            Spacer(modifier = Modifier.height(8.dp))
+                            
+                            val presetsRow1 = listOf(
+                                Pair("Телефон", "/storage/emulated/0"),
+                                Pair("Загрузки", "/storage/emulated/0/Download"),
+                                Pair("Камера", "/storage/emulated/0/DCIM")
+                            )
+                            val presetsRow2 = listOf(
+                                Pair("Картинки", "/storage/emulated/0/Pictures"),
+                                Pair("Документы", "/storage/emulated/0/Documents"),
+                                Pair("Музыка", "/storage/emulated/0/Music")
+                            )
+                            val presetsRow3 = listOf(
+                                Pair("Песочница приложения", (context.getExternalFilesDir(null) ?: context.filesDir).absolutePath + "/Shared")
+                            )
+                            
+                            val presetRows = listOf(presetsRow1, presetsRow2, presetsRow3)
+                            
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                presetRows.forEach { rowItems ->
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        rowItems.forEach { (name, path) ->
+                                            val isSelected = localSharedRoot.absolutePath == path
+                                            val presetFile = File(path)
+                                            val exists = presetFile.exists() || name.startsWith("Песочница")
+                                            
+                                            val chipBg = if (isSelected) Color(0xFF386B40) else if (exists) Color(0xFFEDF3E8) else Color(0xFFF0F0F0)
+                                            val chipText = if (isSelected) Color.White else if (exists) Color(0xFF191C19) else Color.LightGray
+                                            
+                                            Box(
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .background(chipBg, RoundedCornerShape(100.dp))
+                                                    .clickable(enabled = exists) {
+                                                        if (name.startsWith("Песочница") && !presetFile.exists()) {
+                                                            presetFile.mkdirs()
+                                                        }
+                                                        viewModel.setLocalSharedRoot(presetFile)
+                                                        customPathInput = presetFile.absolutePath
+                                                        customPathError = ""
+                                                    }
+                                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Text(
+                                                    text = name,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = chipText,
+                                                    fontWeight = FontWeight.Medium,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable {
-                            viewModel.updateHostPermissions(hostPermissions.allowRead, hostPermissions.allowWrite, !hostPermissions.allowDelete)
-                        }.padding(vertical = 4.dp)) {
-                            Checkbox(
-                                checked = hostPermissions.allowDelete,
-                                onCheckedChange = { checked ->
-                                    viewModel.updateHostPermissions(hostPermissions.allowRead, hostPermissions.allowWrite, checked)
-                                }
+
+                        // Section 3: Custom path input
+                        Column {
+                            Text(
+                                "Свой путь:",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF191C19)
                             )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Разрешить удаление файлов/папок", style = MaterialTheme.typography.bodyMedium, color = Color(0xFF191C19))
+                            Spacer(modifier = Modifier.height(6.dp))
+                            
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                OutlinedTextField(
+                                    value = customPathInput,
+                                    onValueChange = { 
+                                        customPathInput = it
+                                        customPathError = ""
+                                    },
+                                    placeholder = { Text("/storage/emulated/0/...", style = MaterialTheme.typography.bodyMedium) },
+                                    modifier = Modifier.weight(1f),
+                                    isError = customPathError.isNotEmpty(),
+                                    maxLines = 2,
+                                    textStyle = MaterialTheme.typography.bodySmall,
+                                    shape = RoundedCornerShape(12.dp)
+                                )
+                                Button(
+                                    onClick = {
+                                        val f = File(customPathInput)
+                                        if (f.exists() && f.isDirectory) {
+                                            viewModel.setLocalSharedRoot(f)
+                                            customPathError = ""
+                                        } else {
+                                            customPathError = "Путь не найден или не является папкой"
+                                        }
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF386B40)),
+                                    shape = RoundedCornerShape(12.dp)
+                                ) {
+                                    Text("ОК", color = Color.White)
+                                }
+                            }
+                            if (customPathError.isNotEmpty()) {
+                                Text(customPathError, color = Color.Red, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
+                            }
+                        }
+
+                        // Section 4: Permissions (Rights)
+                        Column {
+                            Text(
+                                "Права доступа (для клиентов):",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF191C19)
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable {
+                                viewModel.updateHostPermissions(!hostPermissions.allowRead, hostPermissions.allowWrite, hostPermissions.allowDelete)
+                            }.padding(vertical = 4.dp)) {
+                                Checkbox(
+                                    checked = hostPermissions.allowRead,
+                                    onCheckedChange = { checked ->
+                                        viewModel.updateHostPermissions(checked, hostPermissions.allowWrite, hostPermissions.allowDelete)
+                                    }
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Разрешить скачивание (Чтение)", style = MaterialTheme.typography.bodyMedium, color = Color(0xFF191C19))
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable {
+                                viewModel.updateHostPermissions(hostPermissions.allowRead, !hostPermissions.allowWrite, hostPermissions.allowDelete)
+                            }.padding(vertical = 4.dp)) {
+                                Checkbox(
+                                    checked = hostPermissions.allowWrite,
+                                    onCheckedChange = { checked ->
+                                        viewModel.updateHostPermissions(hostPermissions.allowRead, checked, hostPermissions.allowDelete)
+                                    }
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Разрешить загрузку (Запись)", style = MaterialTheme.typography.bodyMedium, color = Color(0xFF191C19))
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable {
+                                viewModel.updateHostPermissions(hostPermissions.allowRead, hostPermissions.allowWrite, !hostPermissions.allowDelete)
+                            }.padding(vertical = 4.dp)) {
+                                Checkbox(
+                                    checked = hostPermissions.allowDelete,
+                                    onCheckedChange = { checked ->
+                                        viewModel.updateHostPermissions(hostPermissions.allowRead, hostPermissions.allowWrite, checked)
+                                    }
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Разрешить удаление", style = MaterialTheme.typography.bodyMedium, color = Color(0xFF191C19))
+                            }
                         }
                     }
                 },
                 confirmButton = {
                     Button(
-                        onClick = { showPermissionsDialog = false },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF386B40))
+                        onClick = { showSettingsDialog = false },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF386B40)),
+                        shape = RoundedCornerShape(12.dp)
                     ) {
-                        Text("Готово", color = Color.White)
+                        Text("Закрыть", color = Color.White)
                     }
                 }
             )
@@ -1305,5 +1511,13 @@ fun SideNavigationTab(
             )
         }
     }
+}
+
+private fun formatBytesSize(bytes: Long): String {
+    if (bytes <= 0) return "0 Б"
+    val units = arrayOf("Б", "КБ", "МБ", "ГБ", "ТБ")
+    val digitGroups = (Math.log10(bytes.toDouble()) / Math.log10(1024.0)).toInt()
+    val index = if (digitGroups < units.size) digitGroups else units.size - 1
+    return String.format(Locale.US, "%.2f %s", bytes / Math.pow(1024.0, index.toDouble()), units[index])
 }
 

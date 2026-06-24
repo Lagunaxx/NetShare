@@ -26,7 +26,18 @@ enum class ConnectionState {
     ERROR
 }
 
+data class FolderStats(
+    val folderPath: String = "",
+    val totalFiles: Int = 0,
+    val totalFolders: Int = 0,
+    val totalSize: Long = 0L,
+    val isCalculating: Boolean = false
+)
+
 class FileSharingViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val _localFolderStats = MutableStateFlow(FolderStats())
+    val localFolderStats = _localFolderStats.asStateFlow()
 
     private val _localSharedRoot = MutableStateFlow<File>(
         File("/storage/emulated/0").let {
@@ -86,6 +97,7 @@ class FileSharingViewModel(application: Application) : AndroidViewModel(applicat
     init {
         refreshLocalFiles()
         updateLocalIp()
+        calculateLocalFolderStats()
         viewModelScope.launch(Dispatchers.IO) {
             startServer() // Start hosting in background to prevent NetworkOnMainThreadException
         }
@@ -101,6 +113,63 @@ class FileSharingViewModel(application: Application) : AndroidViewModel(applicat
         _localIpAddress.value = NetworkUtils.getLocalIpAddress()
     }
 
+    fun calculateLocalFolderStats() {
+        val root = _localSharedRoot.value
+        _localFolderStats.value = FolderStats(folderPath = root.absolutePath, isCalculating = true)
+        
+        viewModelScope.launch(Dispatchers.IO) {
+            var filesCount = 0
+            var foldersCount = 0
+            var sizeSum = 0L
+            var elementsChecked = 0
+            val maxElements = 1000
+            
+            fun traverse(file: java.io.File, depth: Int): Boolean {
+                if (elementsChecked >= maxElements) return false
+                if (file.isDirectory) {
+                    val list = file.listFiles()
+                    if (list != null) {
+                        for (child in list) {
+                            elementsChecked++
+                            if (elementsChecked >= maxElements) return false
+                            if (child.isDirectory) {
+                                foldersCount++
+                                if (depth < 2) {
+                                    if (!traverse(child, depth + 1)) return false
+                                }
+                            } else {
+                                filesCount++
+                                sizeSum += child.length()
+                            }
+                        }
+                    }
+                } else {
+                    filesCount++
+                    sizeSum += file.length()
+                }
+                return true
+            }
+            
+            try {
+                if (root.exists()) {
+                    traverse(root, 0)
+                }
+                _localFolderStats.value = FolderStats(
+                    folderPath = root.absolutePath,
+                    totalFiles = filesCount,
+                    totalFolders = foldersCount,
+                    totalSize = sizeSum,
+                    isCalculating = false
+                )
+            } catch (e: Exception) {
+                _localFolderStats.value = FolderStats(
+                    folderPath = root.absolutePath,
+                    isCalculating = false
+                )
+            }
+        }
+    }
+
     fun setRemoteIp(ip: String) {
         _remoteIp.value = ip.trim()
     }
@@ -114,6 +183,7 @@ class FileSharingViewModel(application: Application) : AndroidViewModel(applicat
             _localSharedRoot.value = folder
             _currentLocalDir.value = folder
             refreshLocalFiles()
+            calculateLocalFolderStats()
             addLog("Shared folder changed: ${folder.absolutePath}")
             // Restart server context with new shared root
             if (_isServerRunning.value) {
