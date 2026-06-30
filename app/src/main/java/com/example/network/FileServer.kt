@@ -246,18 +246,38 @@ class FileServer(
 
             destFile.parentFile?.mkdirs()
 
+            var completed = false
             val fileOutputStream = FileOutputStream(destFile)
-            val buffer = ByteArray(64 * 1024)
-            var totalRead = 0L
-            while (totalRead < contentLength) {
-                val remaining = contentLength - totalRead
-                val toRead = if (remaining > buffer.size) buffer.size else remaining.toInt()
-                val bytesRead = input.read(buffer, 0, toRead)
-                if (bytesRead == -1) break
-                fileOutputStream.write(buffer, 0, bytesRead)
-                totalRead += bytesRead
+            try {
+                val buffer = ByteArray(64 * 1024)
+                var totalRead = 0L
+                while (totalRead < contentLength) {
+                    val remaining = contentLength - totalRead
+                    val toRead = if (remaining > buffer.size) buffer.size else remaining.toInt()
+                    val bytesRead = input.read(buffer, 0, toRead)
+                    if (bytesRead == -1) break
+                    fileOutputStream.write(buffer, 0, bytesRead)
+                    totalRead += bytesRead
+                }
+                fileOutputStream.flush()
+                if (totalRead == contentLength) {
+                    completed = true
+                }
+            } finally {
+                try {
+                    fileOutputStream.close()
+                } catch (ignored: Exception) {}
             }
-            fileOutputStream.close()
+
+            if (!completed) {
+                try {
+                    if (destFile.exists()) {
+                        destFile.delete()
+                    }
+                } catch (ignored: Exception) {}
+                sendErrorResponse(output, 400, "Incomplete upload or connection interrupted")
+                return
+            }
 
             sendResponse(output, 200, "Upload successful")
             onLog("Uploaded file: ${destFile.name}")

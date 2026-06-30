@@ -8,6 +8,7 @@ import urllib.parse
 import http.server
 import socketserver
 import threading
+import shutil
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import time
@@ -174,6 +175,7 @@ class SharedFolderHTTPHandler(http.server.BaseHTTPRequestHandler):
         if parsed.path == "/upload":
             if not self.check_permission("write"):
                 return
+            completed = False
             try:
                 content_len = int(self.headers.get('Content-Length', 0))
                 os.makedirs(os.path.dirname(target), exist_ok=True)
@@ -186,10 +188,21 @@ class SharedFolderHTTPHandler(http.server.BaseHTTPRequestHandler):
                             break
                         f.write(chunk)
                         remaining -= len(chunk)
-                self.respond(200, "Upload successful")
-                self.server.app.log(f"Received file: {os.path.basename(target)}")
+                if remaining == 0:
+                    completed = True
+                    self.respond(200, "Upload successful")
+                    self.server.app.log(f"Received file: {os.path.basename(target)}")
+                else:
+                    self.respond(400, "Incomplete upload")
             except Exception as e:
                 self.respond(500, f"Error receiving file: {str(e)}")
+            finally:
+                if not completed:
+                    try:
+                        if os.path.exists(target):
+                            os.remove(target)
+                    except Exception:
+                        pass
 
         elif parsed.path == "/create_folder":
             if not self.check_permission("write"):
@@ -238,6 +251,9 @@ class WiFiShareApp(tk.Tk):
         self.allow_write = tk.BooleanVar(value=True)
         self.allow_delete = tk.BooleanVar(value=True)
 
+        self.total_files_to_transfer = 0
+        self.current_file_index = 0
+
         self.server_thread = None
         self.http_server = None
 
@@ -249,6 +265,46 @@ class WiFiShareApp(tk.Tk):
     def log(self, text):
         timestamp = time.strftime("%H:%M:%S")
         self.log_list.insert(0, f"[{timestamp}] {text}")
+
+    def set_progress(self, current, total):
+        def gui_update():
+            self.progress_bar["maximum"] = total
+            self.progress_bar["value"] = current
+            if total > 0:
+                self.lbl_progress.config(text=f"Копирование: {current} из {total} файлов")
+            else:
+                self.lbl_progress.config(text="")
+        self.after(0, gui_update)
+
+    def count_local_files_recursive(self, path):
+        if not os.path.isdir(path):
+            return 1
+        count = 1
+        try:
+            items = os.listdir(path)
+        except Exception:
+            return count
+        for item in items:
+            count += self.count_local_files_recursive(os.path.join(path, item))
+        return count
+
+    def count_remote_files_recursive(self, rel_path, is_dir, ip, port):
+        if not is_dir:
+            return 1
+        count = 1
+        url = f"http://{ip}:{port}/list?path={urllib.parse.quote(rel_path)}"
+        try:
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req) as response:
+                body = response.read().decode("utf-8")
+                remote_files = json.loads(body)
+        except Exception:
+            return count
+        for item in remote_files:
+            child_rel = item.get("relativePath")
+            child_is_dir = item.get("isDirectory", False)
+            count += self.count_remote_files_recursive(child_rel, child_is_dir, ip, port)
+        return count
 
     def get_local_ip(self):
         try:
@@ -339,23 +395,40 @@ class WiFiShareApp(tk.Tk):
         tk.Button(dialog, text="Создать", command=confirm).pack(pady=10)
 
     def delete_local(self):
-        item = self.local_list.focus()
-        if not item: return
-        values = self.local_list.item(item, "values")
-        name = values[0]
-        if name == "..": return
+        items = self.local_list.selection()
+        if not items:
+            messagebox.showinfo("Информация", "Выберите элементы для удаления")
+            return
+        
+        valid_items = []
+        for item in items:
+            values = self.local_list.item(item, "values")
+            if values and values[0] != "..":
+                valid_items.append((item, values[0]))
+                
+        if not valid_items:
+            return
 
-        if messagebox.askyesno("Удаление", f"Вы уверены, что хотите удалить {name}?"):
-            target = os.path.join(self.root_folder, self.local_current_path, name)
-            try:
-                if os.path.isdir(target):
-                    shutil.rmtree(target)
-                else:
-                    os.remove(target)
-                self.refresh_local()
-                self.log(f"Удален локальный элемент: {name}")
-            except Exception as e:
-                messagebox.showerror("Ошибка", f"Не удалось удалить: {e}")
+        names_str = ", ".join([name for _, name in valid_items[:5]])
+        if len(valid_items) > 5:
+            names_str += f" и еще {len(valid_items) - 5}"
+            
+        if messagebox.askyesno("Удаление", f"Вы уверены, что хотите удалить {len(valid_items)} элементов:\n{names_str}?"):
+            success_count = 0
+            for item, name in valid_items:
+                target = os.path.join(self.root_folder, self.local_current_path, name)
+                try:
+                    if os.path.isdir(target):
+                        shutil.rmtree(target)
+                    else:
+                        os.remove(target)
+                    success_count += 1
+                except Exception as e:
+                    self.log(f"Не удалось удалить {name}: {e}")
+            
+            self.refresh_local()
+            if success_count > 0:
+                self.log(f"Успешно удалено локальных элементов: {success_count}")
 
     # Remote Connection
     def connect_remote(self):
@@ -475,112 +548,256 @@ class WiFiShareApp(tk.Tk):
 
     def delete_remote(self):
         if not self.connected_state: return
-        item = self.remote_list.focus()
-        if not item: return
-        values = self.remote_list.item(item, "values")
-        name = values[0]
-        if name == "..": return
-        rel_path = values[3]
+        items = self.remote_list.selection()
+        if not items:
+            messagebox.showinfo("Информация", "Выберите удаленные элементы для удаления")
+            return
+            
+        valid_items = []
+        for item in items:
+            values = self.remote_list.item(item, "values")
+            if values and values[0] != "..":
+                valid_items.append((item, values[0], values[3])) # item, name, rel_path
+                
+        if not valid_items:
+            return
 
-        if messagebox.askyesno("Удаление", f"Вы уверены, что хотите удалить удаленный элемент {name}?"):
+        names_str = ", ".join([name for _, name, _ in valid_items[:5]])
+        if len(valid_items) > 5:
+            names_str += f" и еще {len(valid_items) - 5}"
+
+        if messagebox.askyesno("Удаление", f"Вы уверены, что хотите удалить с удаленного устройства {len(valid_items)} элементов:\n{names_str}?"):
             ip = self.remote_ip.get().strip()
             port = self.remote_port.get()
-            url = f"http://{ip}:{port}/delete?path={urllib.parse.quote(rel_path)}"
             
             def run():
-                try:
-                    req = urllib.request.Request(url, data=b"", method="POST")
-                    with urllib.request.urlopen(req) as r:
-                        self.refresh_remote()
-                        self.log(f"Удален удаленный элемент: {name}")
-                except Exception as e:
-                    self.log(f"Ошибка удаления: {e}")
+                success_count = 0
+                for item, name, rel_path in valid_items:
+                    url = f"http://{ip}:{port}/delete?path={urllib.parse.quote(rel_path)}"
+                    try:
+                        req = urllib.request.Request(url, data=b"", method="POST")
+                        with urllib.request.urlopen(req) as r:
+                            success_count += 1
+                            self.log(f"Удален удаленный элемент: {name}")
+                    except Exception as e:
+                        self.log(f"Ошибка удаления удаленного элемента {name}: {e}")
+                
+                self.refresh_remote()
+                if success_count > 0:
+                    self.log(f"Успешно удалено удаленных элементов: {success_count}")
             
             threading.Thread(target=run, daemon=True).start()
+
+    def upload_local_dir_recursive(self, local_dir_path, remote_rel_path, ip, port):
+        self.current_file_index += 1
+        self.set_progress(self.current_file_index, self.total_files_to_transfer)
+        url = f"http://{ip}:{port}/create_folder?path={urllib.parse.quote(remote_rel_path)}"
+        try:
+            req = urllib.request.Request(url, data=b"", method="POST")
+            with urllib.request.urlopen(req) as r:
+                self.log(f"Создана удаленная папка: {os.path.basename(local_dir_path)}")
+        except Exception as e:
+            self.log(f"Ошибка создания папки {remote_rel_path}: {e}")
+            return False
+
+        try:
+            items = os.listdir(local_dir_path)
+        except Exception as e:
+            self.log(f"Ошибка чтения локальной папки {local_dir_path}: {e}")
+            return False
+
+        for name in items:
+            child_local_path = os.path.join(local_dir_path, name)
+            child_remote_rel = f"{remote_rel_path}/{name}".replace("\\", "/")
+            if os.path.isdir(child_local_path):
+                if not self.upload_local_dir_recursive(child_local_path, child_remote_rel, ip, port):
+                    return False
+            else:
+                self.current_file_index += 1
+                self.set_progress(self.current_file_index, self.total_files_to_transfer)
+                url = f"http://{ip}:{port}/upload?path={urllib.parse.quote(child_remote_rel)}"
+                self.log(f"Отправка файла {name}...")
+                try:
+                    with open(child_local_path, "rb") as f:
+                        file_data = f.read()
+                    req = urllib.request.Request(url, data=file_data, method="POST")
+                    req.add_header("Content-Type", "application/octet-stream")
+                    with urllib.request.urlopen(req) as r:
+                        self.log(f"Файл успешно отправлен: {name}")
+                except Exception as e:
+                    self.log(f"Ошибка отправки файла {name}: {e}")
+                    return False
+        return True
+
+    def download_remote_dir_recursive(self, remote_rel_path, local_dest_path, ip, port):
+        self.current_file_index += 1
+        self.set_progress(self.current_file_index, self.total_files_to_transfer)
+        try:
+            os.makedirs(local_dest_path, exist_ok=True)
+            self.log(f"Создана локальная папка: {os.path.basename(local_dest_path)}")
+        except Exception as e:
+            self.log(f"Ошибка создания локальной папки {local_dest_path}: {e}")
+            return False
+
+        url = f"http://{ip}:{port}/list?path={urllib.parse.quote(remote_rel_path)}"
+        try:
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req) as response:
+                body = response.read().decode("utf-8")
+                remote_files = json.loads(body)
+        except Exception as e:
+            self.log(f"Ошибка получения списка файлов для {remote_rel_path}: {e}")
+            return False
+
+        for remote_child in remote_files:
+            child_name = remote_child.get("name")
+            child_is_dir = remote_child.get("isDirectory", False)
+            child_rel_path = remote_child.get("relativePath")
+            child_local_path = os.path.join(local_dest_path, child_name)
+
+            if child_is_dir:
+                if not self.download_remote_dir_recursive(child_rel_path, child_local_path, ip, port):
+                    return False
+            else:
+                self.current_file_index += 1
+                self.set_progress(self.current_file_index, self.total_files_to_transfer)
+                url_download = f"http://{ip}:{port}/download?path={urllib.parse.quote(child_rel_path)}"
+                self.log(f"Скачивание файла {child_name}...")
+                try:
+                    req_dl = urllib.request.Request(url_download)
+                    with urllib.request.urlopen(req_dl) as response_dl:
+                        with open(child_local_path, "wb") as f:
+                            shutil.copyfileobj(response_dl, f)
+                    self.log(f"Файл успешно скачан: {child_name}")
+                except Exception as e:
+                    self.log(f"Ошибка скачивания файла {child_name}: {e}")
+                    return False
+        return True
 
     # Copy / File Transfers
     def copy_local_to_remote(self):
         if not self.connected_state:
             messagebox.showerror("Ошибка", "Подключитесь к устройству")
             return
-        item = self.local_list.focus()
-        if not item: return
-        values = self.local_list.item(item, "values")
-        name = values[0]
-        if name == "..": return
-        is_dir = values[1] == "[Папка]"
+        items = self.local_list.selection()
+        if not items:
+            messagebox.showinfo("Информация", "Выберите локальные элементы для отправки")
+            return
 
-        local_file = os.path.join(self.root_folder, self.local_current_path, name)
-        remote_rel = os.path.join(self.remote_current_path, name).replace("\\", "/")
+        valid_items = []
+        for item in items:
+            values = self.local_list.item(item, "values")
+            if values and values[0] != "..":
+                is_dir = values[1] == "[Папка]"
+                valid_items.append((values[0], is_dir))
+
+        if not valid_items:
+            return
 
         ip = self.remote_ip.get().strip()
         port = self.remote_port.get()
 
-        if is_dir:
-            # Create folder on remote
-            url = f"http://{ip}:{port}/create_folder?path={urllib.parse.quote(remote_rel)}"
-            def run():
-                try:
-                    req = urllib.request.Request(url, data=b"", method="POST")
-                    with urllib.request.urlopen(req) as r:
-                        self.log(f"Скопирована структура папки: {name}")
-                        self.refresh_remote()
-                except Exception as e:
-                    self.log(f"Ошибка копирования папки: {e}")
-            threading.Thread(target=run, daemon=True).start()
-        else:
-            # Upload file
-            url = f"http://{ip}:{port}/upload?path={urllib.parse.quote(remote_rel)}"
-            self.log(f"Отправка файла {name}...")
+        def run():
+            success_count = 0
+            total = 0
+            for name, is_dir in valid_items:
+                local_file = os.path.join(self.root_folder, self.local_current_path, name)
+                total += self.count_local_files_recursive(local_file)
+            self.total_files_to_transfer = total
+            self.current_file_index = 0
+            self.set_progress(0, total)
+
+            for name, is_dir in valid_items:
+                local_file = os.path.join(self.root_folder, self.local_current_path, name)
+                remote_rel = os.path.join(self.remote_current_path, name).replace("\\", "/")
+                
+                if is_dir:
+                    self.log(f"Копирование папки {name} рекурсивно...")
+                    if self.upload_local_dir_recursive(local_file, remote_rel, ip, port):
+                        success_count += 1
+                else:
+                    self.current_file_index += 1
+                    self.set_progress(self.current_file_index, self.total_files_to_transfer)
+                    url = f"http://{ip}:{port}/upload?path={urllib.parse.quote(remote_rel)}"
+                    self.log(f"Отправка файла {name}...")
+                    try:
+                        with open(local_file, "rb") as f:
+                            file_data = f.read()
+                        req = urllib.request.Request(url, data=file_data, method="POST")
+                        req.add_header("Content-Type", "application/octet-stream")
+                        with urllib.request.urlopen(req) as r:
+                            self.log(f"Файл успешно отправлен: {name}")
+                            success_count += 1
+                    except Exception as e:
+                        self.log(f"Ошибка отправки файла {name}: {e}")
             
-            def run():
-                try:
-                    with open(local_file, "rb") as f:
-                        file_data = f.read()
-                    req = urllib.request.Request(url, data=file_data, method="POST")
-                    req.add_header("Content-Type", "application/octet-stream")
-                    with urllib.request.urlopen(req) as r:
-                        self.log(f"Файл успешно отправлен: {name}")
-                        self.refresh_remote()
-                except Exception as e:
-                    self.log(f"Ошибка отправки файла: {e}")
-            
-            threading.Thread(target=run, daemon=True).start()
+            self.set_progress(0, 0)
+            self.refresh_remote()
+            if success_count > 0:
+                self.log(f"Успешно отправлено элементов: {success_count}")
+
+        threading.Thread(target=run, daemon=True).start()
 
     def copy_remote_to_local(self):
-        if not self.connected_state: return
-        item = self.remote_list.focus()
-        if not item: return
-        values = self.remote_list.item(item, "values")
-        name = values[0]
-        if name == "..": return
-        is_dir = values[1] == "[Папка]"
-        remote_rel = values[3]
+        if not self.connected_state:
+            messagebox.showerror("Ошибка", "Подключитесь к устройству")
+            return
+        items = self.remote_list.selection()
+        if not items:
+            messagebox.showinfo("Информация", "Выберите удаленные элементы для скачивания")
+            return
 
-        local_file = os.path.join(self.root_folder, self.local_current_path, name)
+        valid_items = []
+        for item in items:
+            values = self.remote_list.item(item, "values")
+            if values and values[0] != "..":
+                is_dir = values[1] == "[Папка]"
+                remote_rel = values[3]
+                valid_items.append((values[0], is_dir, remote_rel))
+
+        if not valid_items:
+            return
+
         ip = self.remote_ip.get().strip()
         port = self.remote_port.get()
 
-        if is_dir:
-            os.makedirs(local_file, exist_ok=True)
+        def run():
+            success_count = 0
+            total = 0
+            for name, is_dir, remote_rel in valid_items:
+                total += self.count_remote_files_recursive(remote_rel, is_dir, ip, port)
+            self.total_files_to_transfer = total
+            self.current_file_index = 0
+            self.set_progress(0, total)
+
+            for name, is_dir, remote_rel in valid_items:
+                local_file = os.path.join(self.root_folder, self.local_current_path, name)
+                
+                if is_dir:
+                    self.log(f"Копирование папки {name} рекурсивно...")
+                    if self.download_remote_dir_recursive(remote_rel, local_file, ip, port):
+                        success_count += 1
+                else:
+                    self.current_file_index += 1
+                    self.set_progress(self.current_file_index, self.total_files_to_transfer)
+                    url = f"http://{ip}:{port}/download?path={urllib.parse.quote(remote_rel)}"
+                    self.log(f"Скачивание файла {name}...")
+                    try:
+                        req = urllib.request.Request(url)
+                        with urllib.request.urlopen(req) as response:
+                            with open(local_file, "wb") as f:
+                                shutil.copyfileobj(response, f)
+                        self.log(f"Файл успешно скачан: {name}")
+                        success_count += 1
+                    except Exception as e:
+                        self.log(f"Ошибка скачивания файла {name}: {e}")
+                        
+            self.set_progress(0, 0)
             self.refresh_local()
-            self.log(f"Создана папка локально: {name}")
-        else:
-            url = f"http://{ip}:{port}/download?path={urllib.parse.quote(remote_rel)}"
-            self.log(f"Скачивание файла {name}...")
-            
-            def run():
-                try:
-                    req = urllib.request.Request(url)
-                    with urllib.request.urlopen(req) as response:
-                        with open(local_file, "wb") as f:
-                            shutil.copyfileobj(response, f)
-                    self.log(f"Файл успешно скачан: {name}")
-                    self.refresh_local()
-                except Exception as e:
-                    self.log(f"Ошибка скачивания файла: {e}")
-            
-            threading.Thread(target=run, daemon=True).start()
+            if success_count > 0:
+                self.log(f"Успешно скачано элементов: {success_count}")
+
+        threading.Thread(target=run, daemon=True).start()
 
     def select_local_folder(self):
         folder = filedialog.askdirectory(initialdir=self.root_folder, title="Выбрать корневую папку обмена")
@@ -589,6 +806,20 @@ class WiFiShareApp(tk.Tk):
             self.local_current_path = ""
             self.refresh_local()
             self.log(f"Выбрана новая папка обмена: {self.root_folder}")
+
+    def jump_local_location(self, folder_path):
+        path = os.path.abspath(os.path.expanduser(folder_path))
+        if not os.path.exists(path):
+            try:
+                os.makedirs(path, exist_ok=True)
+            except Exception as e:
+                self.log(f"Не удалось создать папку: {e}")
+                messagebox.showerror("Ошибка", f"Не удалось создать папку: {e}")
+                return
+        self.root_folder = path
+        self.local_current_path = ""
+        self.refresh_local()
+        self.log(f"Переход в папку: {self.root_folder}")
 
     # Display Shareable IP QR
     def show_qr(self):
@@ -684,7 +915,25 @@ class WiFiShareApp(tk.Tk):
         self.lbl_local_path = tk.Label(left_pane, text="Папка: /", bg="#F3F4F6", anchor="w", padx=5)
         self.lbl_local_path.pack(fill="x")
 
-        self.local_list = ttk.Treeview(left_pane, columns=("name", "type", "size"), show="headings")
+        # Quick Jump locations frame (analogous to Android quick jump chips)
+        quick_jump_frame = tk.Frame(left_pane, bg="#FFFFFF")
+        quick_jump_frame.pack(fill="x", padx=5, pady=4)
+        
+        tk.Label(quick_jump_frame, text="Переход:", bg="#FFFFFF", font=("Arial", 9, "bold"), fg="#4B5563").pack(side="left", padx=(2, 5))
+        
+        btn_sandbox = tk.Button(quick_jump_frame, text="Песочница", command=lambda: self.jump_local_location("~/SharedFiles"), bg="#E5E7EB", fg="#111827", bd=0, padx=8, pady=3, font=("Arial", 8, "bold"))
+        btn_sandbox.pack(side="left", padx=2)
+        
+        btn_downloads = tk.Button(quick_jump_frame, text="Загрузки", command=lambda: self.jump_local_location("~/Downloads"), bg="#E5E7EB", fg="#111827", bd=0, padx=8, pady=3, font=("Arial", 8, "bold"))
+        btn_downloads.pack(side="left", padx=2)
+        
+        btn_documents = tk.Button(quick_jump_frame, text="Документы", command=lambda: self.jump_local_location("~/Documents"), bg="#E5E7EB", fg="#111827", bd=0, padx=8, pady=3, font=("Arial", 8, "bold"))
+        btn_documents.pack(side="left", padx=2)
+        
+        btn_pictures = tk.Button(quick_jump_frame, text="Изображения", command=lambda: self.jump_local_location("~/Pictures"), bg="#E5E7EB", fg="#111827", bd=0, padx=8, pady=3, font=("Arial", 8, "bold"))
+        btn_pictures.pack(side="left", padx=2)
+
+        self.local_list = ttk.Treeview(left_pane, columns=("name", "type", "size"), show="headings", selectmode="extended")
         self.local_list.heading("name", text="Имя")
         self.local_list.heading("type", text="Тип")
         self.local_list.heading("size", text="Размер")
@@ -716,7 +965,7 @@ class WiFiShareApp(tk.Tk):
         self.lbl_remote_path = tk.Label(right_pane, text="Удаленная папка: /", bg="#F3F4F6", anchor="w", padx=5)
         self.lbl_remote_path.pack(fill="x")
 
-        self.remote_list = ttk.Treeview(right_pane, columns=("name", "type", "size", "rel_path"), show="headings")
+        self.remote_list = ttk.Treeview(right_pane, columns=("name", "type", "size", "rel_path"), show="headings", selectmode="extended")
         self.remote_list.heading("name", text="Имя")
         self.remote_list.heading("type", text="Тип")
         self.remote_list.heading("size", text="Размер")
@@ -730,6 +979,13 @@ class WiFiShareApp(tk.Tk):
         # Log & Status Bar (Bottom)
         bottom_frame = tk.Frame(self, bg="#FFFFFF", bd=1, relief="ridge")
         bottom_frame.pack(fill="x", padx=10, pady=10)
+
+        progress_frame = tk.Frame(bottom_frame, bg="#FFFFFF")
+        progress_frame.pack(fill="x", padx=5, pady=4)
+        self.lbl_progress = tk.Label(progress_frame, text="", font=("Arial", 9, "bold"), fg="#047857", bg="#FFFFFF")
+        self.lbl_progress.pack(side="left", padx=5)
+        self.progress_bar = ttk.Progressbar(progress_frame, orient="horizontal", length=300, mode="determinate")
+        self.progress_bar.pack(side="right", fill="x", expand=True, padx=5)
 
         tk.Label(bottom_frame, text="Лог действий:", font=("Arial", 9, "bold"), bg="#FFFFFF").pack(anchor="w", padx=5, pady=2)
         

@@ -112,6 +112,7 @@ class FileClient(private val onLog: (String) -> Unit) {
                     return
                 }
 
+                var completed = false
                 try {
                     val body = response.body ?: throw IOException("Empty response body")
                     val totalBytes = body.contentLength()
@@ -134,8 +135,18 @@ class FileClient(private val onLog: (String) -> Unit) {
                     outputStream.flush()
                     outputStream.close()
                     inputStream.close()
+                    completed = true
                     onSuccess()
                 } catch (e: Exception) {
+                    if (!completed) {
+                        try {
+                            if (localDestFile.exists()) {
+                                localDestFile.delete()
+                            }
+                        } catch (de: Exception) {
+                            // ignore
+                        }
+                    }
                     onError("Write error: ${e.message}")
                 }
             }

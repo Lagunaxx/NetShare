@@ -12,8 +12,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -40,6 +43,7 @@ import android.widget.Toast
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
@@ -56,6 +60,10 @@ import java.util.*
 fun MainLayout(viewModel: FileSharingViewModel) {
     val context = LocalContext.current
     val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+
+    androidx.activity.compose.BackHandler(enabled = true) {
+        (context as? android.app.Activity)?.moveTaskToBack(true)
+    }
 
     // State bindings
     val localSharedRoot by viewModel.localSharedRoot.collectAsState()
@@ -74,8 +82,11 @@ fun MainLayout(viewModel: FileSharingViewModel) {
     val remotePermissions by viewModel.remotePermissions.collectAsState()
     val logs by viewModel.logs.collectAsState()
     val transferProgress by viewModel.transferProgress.collectAsState()
+    val overallProgress by viewModel.overallProgress.collectAsState()
+    val activeCollision by viewModel.activeCollision.collectAsState()
     val sharedUri by viewModel.sharedUri.collectAsState()
     val localFolderStats by viewModel.localFolderStats.collectAsState()
+    val sharedFolderHistory by viewModel.sharedFolderHistory.collectAsState()
 
     // Dialog flags
     var showQrDialog by remember { mutableStateOf(false) }
@@ -155,40 +166,44 @@ fun MainLayout(viewModel: FileSharingViewModel) {
                             ipInputText = it
                             viewModel.setRemoteIp(it)
                         },
-                        placeholder = { Text("IP удаленного устройства", style = MaterialTheme.typography.bodyMedium, color = Color(0xFF72796F)) },
+                        placeholder = { Text("IP или URL устройства", style = MaterialTheme.typography.bodyMedium, color = Color(0xFF5B625A)) },
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(
+                            color = Color(0xFF191C19),
+                            fontWeight = FontWeight.Bold
+                        ),
                         leadingIcon = {
                             Icon(
                                 imageVector = Icons.Default.Wifi,
                                 contentDescription = "Wifi",
-                                tint = Color(0xFF424940),
+                                tint = Color(0xFF386B40),
                                 modifier = Modifier.size(18.dp)
                             )
                         },
                         modifier = Modifier
                             .weight(1f)
-                            .height(48.dp),
+                            .height(54.dp),
                         shape = RoundedCornerShape(14.dp),
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedContainerColor = Color(0xFFFBFDF8),
-                            unfocusedContainerColor = Color(0xFFFBFDF8),
-                            focusedBorderColor = Color(0xFF72796F),
+                            unfocusedContainerColor = Color(0xFFF0F4EC),
+                            focusedBorderColor = Color(0xFF386B40),
                             unfocusedBorderColor = Color(0xFFDCE5D5)
                         ),
                         singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone)
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
                     )
 
                     IconButton(
                         onClick = { showScannerDialog = true },
                         modifier = Modifier
-                            .size(48.dp)
+                            .size(54.dp)
                             .background(Color(0xFFDCE5D5), RoundedCornerShape(14.dp))
                     ) {
                         Icon(
                             imageVector = Icons.Default.QrCodeScanner,
                             contentDescription = "Scan QR",
                             tint = Color(0xFF191C19),
-                            modifier = Modifier.size(20.dp)
+                            modifier = Modifier.size(22.dp)
                         )
                     }
 
@@ -204,7 +219,7 @@ fun MainLayout(viewModel: FileSharingViewModel) {
                             containerColor = if (connectionState == ConnectionState.CONNECTED) Color(0xFFD11A2A) else Color(0xFF386B40)
                         ),
                         shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier.height(48.dp),
+                        modifier = Modifier.height(54.dp),
                         enabled = connectionState == ConnectionState.CONNECTED || (connectionState != ConnectionState.CONNECTING && ipInputText.isNotEmpty())
                     ) {
                         if (connectionState == ConnectionState.CONNECTING) {
@@ -430,13 +445,48 @@ fun MainLayout(viewModel: FileSharingViewModel) {
                 .background(Color(0xFFFBFDF8))
         ) {
             // Transfer progress bar
-            transferProgress?.let { progress ->
+            if (transferProgress != null || overallProgress != null) {
+                val progress = transferProgress ?: 0f
+                val overallText = overallProgress ?: ""
+                val isPausedState by FileSharingViewModel.isPaused.collectAsState()
                 Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
-                    Text(
-                        text = "Копирование файла... ${(progress * 100).toInt()}%",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFF386B40)
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (overallText.isNotEmpty()) "$overallText (${(progress * 100).toInt()}%)" else "Копирование файла... ${(progress * 100).toInt()}%",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFF386B40),
+                            modifier = Modifier.weight(1f)
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            androidx.compose.material3.TextButton(
+                                onClick = { FileSharingViewModel.isPaused.value = !FileSharingViewModel.isPaused.value },
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = if (isPausedState) "Продолжить" else "Пауза",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color(0xFF386B40)
+                                )
+                            }
+                            androidx.compose.material3.TextButton(
+                                onClick = { 
+                                    FileSharingViewModel.isCancelled.value = true
+                                    FileSharingViewModel.isPaused.value = false
+                                },
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = "Отмена",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color.Red
+                                )
+                            }
+                        }
+                    }
                     Spacer(modifier = Modifier.height(4.dp))
                     LinearProgressIndicator(
                         progress = progress,
@@ -767,6 +817,78 @@ fun MainLayout(viewModel: FileSharingViewModel) {
                             }
                         }
 
+                        // Section 3.5: Shared history
+                        if (sharedFolderHistory.isNotEmpty()) {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text(
+                                    "История раздач:",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF191C19)
+                                )
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    sharedFolderHistory.forEach { path ->
+                                        val isCurrent = localSharedRoot.absolutePath == path
+                                        val historyFile = File(path)
+                                        val exists = historyFile.exists()
+                                        
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clip(RoundedCornerShape(12.dp))
+                                                .background(if (isCurrent) Color(0xFFEDF3E8) else Color(0xFFF7F9F6))
+                                                .border(
+                                                    width = 1.dp,
+                                                    color = if (isCurrent) Color(0xFF386B40) else Color(0xFFE2E8DF),
+                                                    shape = RoundedCornerShape(12.dp)
+                                                )
+                                                .clickable(enabled = exists) {
+                                                    viewModel.setLocalSharedRoot(historyFile)
+                                                    customPathInput = path
+                                                    customPathError = ""
+                                                }
+                                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.History,
+                                                contentDescription = null,
+                                                tint = if (isCurrent) Color(0xFF386B40) else Color(0xFF72796F),
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = historyFile.name.ifEmpty { "Внутренняя память" },
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = if (exists) Color(0xFF191C19) else Color.LightGray
+                                                )
+                                                Text(
+                                                    text = path.replace("/storage/emulated/0", "Внутренняя память"),
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = Color(0xFF72796F),
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+                                            IconButton(
+                                                onClick = { viewModel.removeFromSharedHistory(path) },
+                                                modifier = Modifier.size(24.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Delete,
+                                                    contentDescription = "Remove from history",
+                                                    tint = Color.Red.copy(alpha = 0.7f),
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // Section 4: Permissions (Rights)
                         Column {
                             Text(
@@ -965,6 +1087,97 @@ fun MainLayout(viewModel: FileSharingViewModel) {
             )
         }
 
+        // Overwrite Collision Dialog
+        activeCollision?.let { collision ->
+            AlertDialog(
+                onDismissRequest = { 
+                    collision.onDecision(OverwriteDecision.SKIP)
+                },
+                title = {
+                    Text(
+                        text = "Файл уже существует",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                },
+                text = {
+                    Column {
+                        Text(
+                            text = "Файл с именем \"${collision.fileName}\" уже существует в папке назначения.",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Выберите действие для продолжения:",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                },
+                confirmButton = {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = { collision.onDecision(OverwriteDecision.REPLACE) },
+                                modifier = Modifier.weight(1f).testTag("dialog_replace_button"),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFF386B40),
+                                    contentColor = Color.White
+                                )
+                            ) {
+                                Text("Заменить", style = MaterialTheme.typography.labelLarge)
+                            }
+                            
+                            OutlinedButton(
+                                onClick = { collision.onDecision(OverwriteDecision.SKIP) },
+                                modifier = Modifier.weight(1f).testTag("dialog_skip_button"),
+                                border = BorderStroke(1.dp, Color(0xFF386B40)),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = Color(0xFF386B40)
+                                )
+                            ) {
+                                Text("Пропустить", style = MaterialTheme.typography.labelLarge)
+                            }
+                        }
+                        
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = { collision.onDecision(OverwriteDecision.REPLACE_ALL) },
+                                modifier = Modifier.weight(1f).testTag("dialog_replace_all_button"),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFF1B4D24),
+                                    contentColor = Color.White
+                                )
+                            ) {
+                                Text("Заменить все", style = MaterialTheme.typography.labelMedium)
+                            }
+                            
+                            OutlinedButton(
+                                onClick = { collision.onDecision(OverwriteDecision.SKIP_ALL) },
+                                modifier = Modifier.weight(1f).testTag("dialog_skip_all_button"),
+                                border = BorderStroke(1.dp, Color(0xFF1B4D24)),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = Color(0xFF1B4D24)
+                                )
+                            ) {
+                                Text("Пропустить все", style = MaterialTheme.typography.labelMedium)
+                            }
+                        }
+                    }
+                },
+                dismissButton = null
+            )
+        }
+
         // Logs Display Dialog
         if (showLogsDialog) {
             Dialog(onDismissRequest = { showLogsDialog = false }) {
@@ -1080,8 +1293,13 @@ fun MainLayout(viewModel: FileSharingViewModel) {
                                             ipInputText = it
                                             viewModel.setRemoteIp(it)
                                         },
-                                        label = { Text("IP устройства") },
+                                        label = { Text("IP или URL устройства") },
+                                        textStyle = MaterialTheme.typography.bodyMedium.copy(
+                                            color = Color(0xFF191C19),
+                                            fontWeight = FontWeight.Bold
+                                        ),
                                         modifier = Modifier.weight(1f),
+                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                                         trailingIcon = {
                                             IconButton(onClick = { showScannerDialog = true }) {
                                                 Icon(imageVector = Icons.Default.QrCodeScanner, contentDescription = "Scanner")
@@ -1134,52 +1352,184 @@ fun LocalPane(
     connectionActive: Boolean,
     remoteWriteAllowed: Boolean
 ) {
+    val context = LocalContext.current
+    val extFilesDir = context.getExternalFilesDir(null) ?: context.filesDir
+    val sandboxShared = File(extFilesDir, "Shared")
+    
+    val locations = listOf(
+        Pair("Память", File("/storage/emulated/0")),
+        Pair("Загрузки", File("/storage/emulated/0/Download")),
+        Pair("Камера", File("/storage/emulated/0/DCIM")),
+        Pair("Документы", File("/storage/emulated/0/Documents")),
+        Pair("Песочница", sandboxShared)
+    )
+
+    val selectedLocalPaths by viewModel.selectedLocalPaths.collectAsState()
+    val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+
     Card(
         modifier = Modifier.fillMaxSize(),
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Path and actions header
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f))
-                    .padding(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(
-                    onClick = { viewModel.navigateLocalUp() },
-                    enabled = currentLocalDir != localSharedRoot
+            if (isLandscape) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f))
+                        .padding(horizontal = 4.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Local Up")
-                }
+                    IconButton(
+                        onClick = { viewModel.navigateLocalUp() },
+                        enabled = currentLocalDir.absolutePath != "/storage/emulated/0" && currentLocalDir.absolutePath != "/" && currentLocalDir.parentFile != null,
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Local Up", modifier = Modifier.size(20.dp))
+                    }
 
-                Column(modifier = Modifier.weight(1f)) {
+                    val displayPath = currentLocalDir.absolutePath.replace("/storage/emulated/0", "Внутренняя память")
                     Text(
-                        text = "Мои файлы",
-                        fontWeight = FontWeight.Bold,
-                        style = MaterialTheme.typography.titleMedium
-                    )
-                    Text(
-                        text = currentLocalDir.absolutePath.substringAfter(localSharedRoot.parent ?: ""),
+                        text = displayPath,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Bold,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .weight(0.4f)
+                            .padding(horizontal = 4.dp)
                     )
+
+                    Row(
+                        modifier = Modifier
+                            .weight(0.6f)
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        locations.forEach { (name, targetFile) ->
+                            val exists = targetFile.exists() || name == "Песочница"
+                            if (exists) {
+                                val isSelected = currentLocalDir.absolutePath == targetFile.absolutePath
+                                val chipBg = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
+                                val chipTextColor = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onPrimaryContainer
+                                
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(chipBg)
+                                        .clickable {
+                                            if (name == "Песочница" && !targetFile.exists()) {
+                                                targetFile.mkdirs()
+                                            }
+                                            viewModel.navigateLocalDown(targetFile)
+                                        }
+                                        .padding(horizontal = 6.dp, vertical = 4.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = name,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = chipTextColor,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.width(4.dp))
+
+                    IconButton(onClick = onCreateFolder, modifier = Modifier.size(36.dp)) {
+                        Icon(imageVector = Icons.Default.CreateNewFolder, contentDescription = "Create Folder", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                    }
+
+                    IconButton(onClick = { viewModel.refreshLocalFiles() }, modifier = Modifier.size(36.dp)) {
+                        Icon(imageVector = Icons.Default.Refresh, contentDescription = "Refresh Local", modifier = Modifier.size(20.dp))
+                    }
+                }
+            } else {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f))
+                        .padding(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(
+                        onClick = { viewModel.navigateLocalUp() },
+                        enabled = currentLocalDir.absolutePath != "/storage/emulated/0" && currentLocalDir.absolutePath != "/" && currentLocalDir.parentFile != null
+                    ) {
+                        Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Local Up")
+                    }
+
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Мои файлы",
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        val displayPath = currentLocalDir.absolutePath.replace("/storage/emulated/0", "Внутренняя память")
+                        Text(
+                            text = displayPath,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    IconButton(onClick = onCreateFolder) {
+                        Icon(imageVector = Icons.Default.CreateNewFolder, contentDescription = "Create Folder", tint = MaterialTheme.colorScheme.primary)
+                    }
+
+                    IconButton(onClick = { viewModel.refreshLocalFiles() }) {
+                        Icon(imageVector = Icons.Default.Refresh, contentDescription = "Refresh Local")
+                    }
                 }
 
-                IconButton(onClick = onCreateFolder) {
-                    Icon(imageVector = Icons.Default.CreateNewFolder, contentDescription = "Create Folder", tint = MaterialTheme.colorScheme.primary)
-                }
-
-                IconButton(onClick = { viewModel.refreshLocalFiles() }) {
-                    Icon(imageVector = Icons.Default.Refresh, contentDescription = "Refresh Local")
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    locations.forEach { (name, targetFile) ->
+                        val exists = targetFile.exists() || name == "Песочница"
+                        if (exists) {
+                            val isSelected = currentLocalDir.absolutePath == targetFile.absolutePath
+                            val chipBg = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
+                            val chipTextColor = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onPrimaryContainer
+                            
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(chipBg)
+                                    .clickable {
+                                        if (name == "Песочница" && !targetFile.exists()) {
+                                            targetFile.mkdirs()
+                                        }
+                                        viewModel.navigateLocalDown(targetFile)
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = name,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = chipTextColor,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
                 }
             }
 
-            // File items
             if (localFiles.isEmpty()) {
                 Box(
                     modifier = Modifier
@@ -1188,22 +1538,62 @@ fun LocalPane(
                     contentAlignment = Alignment.Center
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(imageVector = Icons.Default.Folder, contentDescription = "Empty", tint = Color.LightGray, modifier = Modifier.size(64.dp))
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text("Здесь пока пусто", color = Color.Gray)
+                        Icon(imageVector = Icons.Default.Folder, contentDescription = "Empty", tint = Color.LightGray, modifier = Modifier.size(48.dp))
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text("Здесь пока пусто", color = Color.Gray, style = MaterialTheme.typography.bodyMedium)
                     }
                 }
             } else {
                 LazyColumn(modifier = Modifier.weight(1f)) {
                     items(localFiles) { file ->
+                        val isSelected = selectedLocalPaths.contains(file.absolutePath)
                         LocalFileItem(
                             file = file,
+                            isSelected = isSelected,
                             onFolderClick = { viewModel.navigateLocalDown(file) },
-                            onCopyToRemote = { viewModel.copyLocalToRemote(file) },
-                            onDelete = { viewModel.deleteLocalFile(file) },
-                            connectionActive = connectionActive,
-                            remoteWriteAllowed = remoteWriteAllowed
+                            onToggleSelection = { viewModel.toggleLocalSelection(file.absolutePath) }
                         )
+                    }
+                }
+            }
+
+            if (selectedLocalPaths.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f))
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Button(
+                        onClick = { viewModel.copySelectedLocalToRemote() },
+                        enabled = connectionActive && remoteWriteAllowed,
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                        modifier = Modifier.weight(1f).height(38.dp)
+                    ) {
+                        Icon(Icons.Default.ArrowForward, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Отправить", style = MaterialTheme.typography.labelMedium)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Button(
+                        onClick = { viewModel.deleteSelectedLocal() },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                        modifier = Modifier.weight(1f).height(38.dp)
+                    ) {
+                        Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Удалить", style = MaterialTheme.typography.labelMedium)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    IconButton(
+                        onClick = { viewModel.clearLocalSelection() },
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(Icons.Default.Close, contentDescription = "Deselect All", tint = Color.Gray)
                     }
                 }
             }
@@ -1220,37 +1610,48 @@ fun RemotePane(
     viewModel: FileSharingViewModel,
     onCreateFolder: () -> Unit
 ) {
+    val selectedRemotePaths by viewModel.selectedRemotePaths.collectAsState()
+    val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+
     Card(
         modifier = Modifier.fillMaxSize(),
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Path and actions header
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f))
-                    .padding(8.dp),
+                    .padding(if (isLandscape) 4.dp else 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(
                     onClick = { viewModel.navigateRemoteUp() },
-                    enabled = currentRemoteSubPath.isNotEmpty()
+                    enabled = currentRemoteSubPath.isNotEmpty(),
+                    modifier = if (isLandscape) Modifier.size(36.dp) else Modifier
                 ) {
-                    Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Remote Up")
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Remote Up",
+                        modifier = if (isLandscape) Modifier.size(20.dp) else Modifier
+                    )
                 }
 
-                Column(modifier = Modifier.weight(1f)) {
+                Column(modifier = Modifier.weight(1f).padding(horizontal = if (isLandscape) 4.dp else 0.dp)) {
+                    if (!isLandscape) {
+                        Text(
+                            text = "Удаленные файлы",
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                    }
+                    val displayPath = if (currentRemoteSubPath.isEmpty()) "/" else "/$currentRemoteSubPath"
                     Text(
-                        text = "Удаленные файлы",
-                        fontWeight = FontWeight.Bold,
-                        style = MaterialTheme.typography.titleMedium
-                    )
-                    Text(
-                        text = if (currentRemoteSubPath.isEmpty()) "/" else "/$currentRemoteSubPath",
+                        text = if (isLandscape) "Удаленно: $displayPath" else displayPath,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.secondary,
+                        fontWeight = if (isLandscape) FontWeight.Bold else FontWeight.Normal,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -1258,16 +1659,27 @@ fun RemotePane(
 
                 IconButton(
                     onClick = onCreateFolder,
-                    enabled = connectionState == ConnectionState.CONNECTED && remotePermissions.allowWrite
+                    enabled = connectionState == ConnectionState.CONNECTED && remotePermissions.allowWrite,
+                    modifier = if (isLandscape) Modifier.size(36.dp) else Modifier
                 ) {
-                    Icon(imageVector = Icons.Default.CreateNewFolder, contentDescription = "Create Remote Folder", tint = MaterialTheme.colorScheme.secondary)
+                    Icon(
+                        imageVector = Icons.Default.CreateNewFolder,
+                        contentDescription = "Create Remote Folder",
+                        tint = MaterialTheme.colorScheme.secondary,
+                        modifier = if (isLandscape) Modifier.size(20.dp) else Modifier
+                    )
                 }
 
                 IconButton(
                     onClick = { viewModel.refreshRemoteFiles() },
-                    enabled = connectionState == ConnectionState.CONNECTED
+                    enabled = connectionState == ConnectionState.CONNECTED,
+                    modifier = if (isLandscape) Modifier.size(36.dp) else Modifier
                 ) {
-                    Icon(imageVector = Icons.Default.Refresh, contentDescription = "Refresh Remote")
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "Refresh Remote",
+                        modifier = if (isLandscape) Modifier.size(20.dp) else Modifier
+                    )
                 }
             }
 
@@ -1280,7 +1692,7 @@ fun RemotePane(
                             .fillMaxWidth(),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("Подключитесь к устройству, чтобы увидеть его файлы", modifier = Modifier.padding(16.dp))
+                        Text("Подключитесь к устройству, чтобы увидеть его файлы", modifier = Modifier.padding(16.dp), style = MaterialTheme.typography.bodyMedium)
                     }
                 }
                 ConnectionState.CONNECTING -> {
@@ -1300,7 +1712,7 @@ fun RemotePane(
                             .fillMaxWidth(),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("Ошибка соединения. Проверьте IP и WiFi.", color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp))
+                        Text("Ошибка соединения. Проверьте IP и WiFi.", color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp), style = MaterialTheme.typography.bodyMedium)
                     }
                 }
                 ConnectionState.CONNECTED -> {
@@ -1312,23 +1724,64 @@ fun RemotePane(
                             contentAlignment = Alignment.Center
                         ) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Icon(imageVector = Icons.Default.Folder, contentDescription = "Empty", tint = Color.LightGray, modifier = Modifier.size(64.dp))
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Text("На удаленном устройстве пусто", color = Color.Gray)
+                                Icon(imageVector = Icons.Default.Folder, contentDescription = "Empty", tint = Color.LightGray, modifier = Modifier.size(48.dp))
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text("На удаленном устройстве пусто", color = Color.Gray, style = MaterialTheme.typography.bodyMedium)
                             }
                         }
                     } else {
                         LazyColumn(modifier = Modifier.weight(1f)) {
                             items(remoteFiles) { remoteFile ->
+                                val isSelected = selectedRemotePaths.contains(remoteFile.relativePath)
                                 RemoteFileItem(
                                     remoteFile = remoteFile,
+                                    isSelected = isSelected,
                                     onFolderClick = { viewModel.navigateRemoteDown(remoteFile) },
-                                    onCopyToLocal = { viewModel.copyRemoteToLocal(remoteFile) },
-                                    onDelete = { viewModel.deleteRemoteFile(remoteFile) },
-                                    deleteAllowed = remotePermissions.allowDelete
+                                    onToggleSelection = { viewModel.toggleRemoteSelection(remoteFile.relativePath) }
                                 )
                             }
                         }
+                    }
+                }
+            }
+
+            if (connectionState == ConnectionState.CONNECTED && selectedRemotePaths.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.2f))
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Button(
+                        onClick = { viewModel.copySelectedRemoteToLocal(remoteFiles) },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                        modifier = Modifier.weight(1f).height(38.dp)
+                    ) {
+                        Icon(Icons.Default.ArrowBack, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Скачать", style = MaterialTheme.typography.labelMedium)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Button(
+                        onClick = { viewModel.deleteSelectedRemote() },
+                        enabled = remotePermissions.allowDelete,
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                        modifier = Modifier.weight(1f).height(38.dp)
+                    ) {
+                        Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Удалить", style = MaterialTheme.typography.labelMedium)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    IconButton(
+                        onClick = { viewModel.clearRemoteSelection() },
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(Icons.Default.Close, contentDescription = "Deselect All", tint = Color.Gray)
                     }
                 }
             }
@@ -1338,130 +1791,121 @@ fun RemotePane(
 
 // --- Individual Item Row components ---
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun LocalFileItem(
     file: File,
+    isSelected: Boolean,
     onFolderClick: () -> Unit,
-    onCopyToRemote: () -> Unit,
-    onDelete: () -> Unit,
-    connectionActive: Boolean,
-    remoteWriteAllowed: Boolean
+    onToggleSelection: () -> Unit,
 ) {
-    val formatter = remember { SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.getDefault()) }
-    val sizeString = if (file.isDirectory) "" else Formatter.formatShortFileSize(LocalContext.current, file.length())
-
     Column {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable { if (file.isDirectory) onFolderClick() }
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+                .combinedClickable(
+                    onClick = {
+                        if (file.isDirectory) {
+                            onFolderClick()
+                        } else {
+                            onToggleSelection()
+                        }
+                    },
+                    onLongClick = {
+                        onToggleSelection()
+                    }
+                )
+                .background(if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f) else Color.Transparent)
+                .padding(horizontal = 10.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
                 imageVector = if (file.isDirectory) Icons.Default.Folder else Icons.Default.InsertDriveFile,
                 contentDescription = if (file.isDirectory) "Dir" else "File",
-                tint = if (file.isDirectory) MaterialTheme.colorScheme.primary else Color.Gray,
-                modifier = Modifier.size(36.dp)
+                tint = if (isSelected) MaterialTheme.colorScheme.primary else (if (file.isDirectory) MaterialTheme.colorScheme.primary.copy(alpha = 0.7f) else Color.Gray),
+                modifier = Modifier.size(24.dp)
             )
 
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.width(8.dp))
 
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = file.name,
-                    fontWeight = FontWeight.SemiBold,
-                    style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+            Text(
+                text = file.name,
+                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+
+            if (isSelected) {
+                Icon(
+                    imageVector = Icons.Default.CheckCircle,
+                    contentDescription = "Selected",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(18.dp)
                 )
-                Text(
-                    text = "${formatter.format(Date(file.lastModified()))} ${if (!file.isDirectory) "• $sizeString" else ""}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color.Gray
-                )
-            }
-
-            // Transfer trigger (upload to remote)
-            if (connectionActive && remoteWriteAllowed) {
-                IconButton(onClick = onCopyToRemote) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                        contentDescription = "Copy to Remote",
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                }
-            }
-
-            // Delete trigger
-            IconButton(onClick = onDelete) {
-                Icon(imageVector = Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error.copy(alpha = 0.8f))
             }
         }
-        HorizontalDivider(color = Color.LightGray.copy(alpha = 0.3f), modifier = Modifier.padding(horizontal = 12.dp))
+        HorizontalDivider(color = Color.LightGray.copy(alpha = 0.2f), modifier = Modifier.padding(horizontal = 10.dp))
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun RemoteFileItem(
     remoteFile: RemoteFile,
+    isSelected: Boolean,
     onFolderClick: () -> Unit,
-    onCopyToLocal: () -> Unit,
-    onDelete: () -> Unit,
-    deleteAllowed: Boolean
+    onToggleSelection: () -> Unit,
 ) {
-    val formatter = remember { SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.getDefault()) }
-    val sizeString = if (remoteFile.isDirectory) "" else Formatter.formatShortFileSize(LocalContext.current, remoteFile.size)
-
     Column {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable { if (remoteFile.isDirectory) onFolderClick() }
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+                .combinedClickable(
+                    onClick = {
+                        if (remoteFile.isDirectory) {
+                            onFolderClick()
+                        } else {
+                            onToggleSelection()
+                        }
+                    },
+                    onLongClick = {
+                        onToggleSelection()
+                    }
+                )
+                .background(if (isSelected) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f) else Color.Transparent)
+                .padding(horizontal = 10.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
                 imageVector = if (remoteFile.isDirectory) Icons.Default.Folder else Icons.Default.InsertDriveFile,
                 contentDescription = if (remoteFile.isDirectory) "Dir" else "File",
-                tint = if (remoteFile.isDirectory) MaterialTheme.colorScheme.secondary else Color.Gray,
-                modifier = Modifier.size(36.dp)
+                tint = if (isSelected) MaterialTheme.colorScheme.secondary else (if (remoteFile.isDirectory) MaterialTheme.colorScheme.secondary.copy(alpha = 0.7f) else Color.Gray),
+                modifier = Modifier.size(24.dp)
             )
 
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.width(8.dp))
 
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = remoteFile.name,
-                    fontWeight = FontWeight.SemiBold,
-                    style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = "${formatter.format(Date(remoteFile.lastModified))} ${if (!remoteFile.isDirectory) "• $sizeString" else ""}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color.Gray
-                )
-            }
+            Text(
+                text = remoteFile.name,
+                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
 
-            // Transfer trigger (download to local)
-            IconButton(onClick = onCopyToLocal) {
+            if (isSelected) {
                 Icon(
-                    imageVector = Icons.Default.KeyboardArrowLeft,
-                    contentDescription = "Copy to Local",
-                    tint = MaterialTheme.colorScheme.secondary
+                    imageVector = Icons.Default.CheckCircle,
+                    contentDescription = "Selected",
+                    tint = MaterialTheme.colorScheme.secondary,
+                    modifier = Modifier.size(18.dp)
                 )
-            }
-
-            // Delete trigger
-            if (deleteAllowed) {
-                IconButton(onClick = onDelete) {
-                    Icon(imageVector = Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error.copy(alpha = 0.8f))
-                }
             }
         }
-        HorizontalDivider(color = Color.LightGray.copy(alpha = 0.3f), modifier = Modifier.padding(horizontal = 12.dp))
+        HorizontalDivider(color = Color.LightGray.copy(alpha = 0.2f), modifier = Modifier.padding(horizontal = 10.dp))
     }
 }
 
